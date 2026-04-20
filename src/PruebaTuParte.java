@@ -1,7 +1,11 @@
+import java.util.concurrent.CyclicBarrier;
+
 public class PruebaTuParte {
     public static void main(String[] args) {
         int ns = 3;
         int nc = 2;
+
+        CyclicBarrier barrera = new CyclicBarrier(nc + ns);
 
         BuzonClasificacion buzonClasificacion = new BuzonClasificacion(5);
         BuzonConsolidacion[] buzones = new BuzonConsolidacion[ns];
@@ -11,12 +15,12 @@ public class PruebaTuParte {
 
         for (int i = 0; i < ns; i++) {
             buzones[i] = new BuzonConsolidacion(3);
-            servidores[i] = new ServidorConsolidacionDespliegue(i + 1, buzones[i]);
+            servidores[i] = new ServidorConsolidacionDespliegue(i + 1, buzones[i], barrera);
             servidores[i].start();
         }
 
         for (int i = 0; i < nc; i++) {
-            clasificadores[i] = new Clasificador(i + 1, buzonClasificacion, buzones, control);
+            clasificadores[i] = new Clasificador(i + 1, buzonClasificacion, buzones, control, barrera);
             clasificadores[i].start();
         }
 

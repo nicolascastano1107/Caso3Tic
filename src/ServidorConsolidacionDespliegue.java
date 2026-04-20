@@ -1,10 +1,14 @@
+import java.util.concurrent.CyclicBarrier;
+
 public class ServidorConsolidacionDespliegue extends Thread {
     private int idServidor;
     private BuzonConsolidacion buzon;
+    private CyclicBarrier barrera;
 
-    public ServidorConsolidacionDespliegue(int pIdServidor, BuzonConsolidacion pBuzon) {
+    public ServidorConsolidacionDespliegue(int pIdServidor, BuzonConsolidacion pBuzon, CyclicBarrier pBarrera) {
         idServidor = pIdServidor;
         buzon = pBuzon;
+        barrera = pBarrera;
     }
 
     public void procesarEvento(Evento e) {
@@ -18,6 +22,8 @@ public class ServidorConsolidacionDespliegue extends Thread {
     }
 
     public void run() {
+        try { barrera.await(); } catch (Exception ex) { }
+
         Evento e;
         boolean terminar = false;
 

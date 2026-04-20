@@ -20,6 +20,19 @@ public class BuzonClasificacion {
         notifyAll();
     }
 
+    public void depositarSemiActivo(Evento e) {
+        while (true) {
+            synchronized (this) {
+                if (cola.size() < capacidad) {
+                    cola.addLast(e);
+                    notifyAll();
+                    return;
+                }
+            }
+            Thread.yield();
+        }
+    }
+
     public synchronized Evento retirar() {
         while (cola.isEmpty()) {
             try {
