@@ -1,113 +1,155 @@
-# Informe Caso 3 - Concurrencia y Sincronizacion de Procesos
+# Informe Caso 3 - Concurrencia y Sincronización de Procesos
+
+**Universidad de los Andes — ISIS 1311 Tecnología e Infraestructura de Cómputo — 2026-1**
+
+## Integrantes del grupo
+
+- Alejandro Cruz Acevedo — 201912149
+- Nicolás Castaño Calderón — 202420324
 
 ## 1. Contexto
 
-Este proyecto contiene una implementacion parcial de un sistema concurrente inspirado en el Caso 3. La version que existe en la carpeta `src` modela la parte de clasificacion y consolidacion de eventos, usando hilos, buzones sincronizados y un mecanismo para coordinar la terminacion de varios clasificadores.
+Este proyecto implementa un simulador concurrente de un sistema IoT para un campus universitario, siguiendo la arquitectura descrita en el enunciado del Caso 3. El sistema modela una cadena de procesamiento de eventos con cinco tipos de actores (sensores, bróker, administrador, clasificadores y servidores de consolidación) que cooperan y compiten por recursos compartidos a través de buzones sincronizados.
 
-El objetivo tecnico de esta implementacion es mostrar:
+El objetivo técnico de la implementación es mostrar:
 
-- Paso de eventos entre productores y consumidores.
-- Sincronizacion con `synchronized`, `wait()` y `notifyAll()`.
-- Terminacion coordinada de multiples clasificadores.
-- Enrutamiento de eventos hacia un servidor segun el tipo del evento.
+- Paso de eventos entre múltiples productores y consumidores en una arquitectura tipo pipeline.
+- Sincronización usando exclusivamente primitivas básicas de Java: `synchronized`, `wait()`, `notifyAll()`, `yield()`, `join()` y `CyclicBarrier`.
+- Uso combinado de patrones de espera pasiva y espera semi-activa, según lo indicado en la Figura 1 del enunciado.
+- Terminación coordinada del sistema usando eventos de fin propagados por la cadena.
+- Evasión de condiciones de carrera y bloqueos mutuos mediante el uso correcto de monitores y variables condicionales.
 
 ## 2. Estructura del proyecto
 
-Los archivos encontrados en la carpeta `src` son los siguientes:
+Los archivos `.java` del proyecto están en la carpeta `src`. La implementación se dividió en dos bloques: la mitad de entrada del sistema (sensores, bróker, administrador) y la mitad de clasificación y consolidación (clasificadores y servidores), más un orquestador principal que lee la configuración e inicia el sistema.
 
-| Archivo | Proposito |
-|---|---|
-| `Evento.java` | Define la estructura basica de un evento. |
-| `BuzonClasificacion.java` | Buzon acotado para eventos que esperan ser clasificados. |
-| `BuzonConsolidacion.java` | Buzon acotado para eventos que llegan a cada servidor. |
-| `Clasificador.java` | Hilo consumidor que toma eventos del buzon de clasificacion y los reenvia al servidor correspondiente. |
-| `ControlFinClasificadores.java` | Control compartido para detectar cuando termina el ultimo clasificador. |
-| `ServidorConsolidacionDespliegue.java` | Hilo consumidor que procesa eventos de su buzon y termina al recibir un evento fin. |
-| `PruebaTuParte.java` | Programa de prueba que arma la arquitectura y deposita eventos manualmente. |
+| Archivo                                | Propósito                                                                                                                             |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `Evento.java`                          | Define la estructura básica de un evento, con id, tipo y bandera de fin.                                                              |
+| `BuzonEntrada.java`                    | Buzón ilimitado donde los sensores depositan los eventos generados.                                                                   |
+| `BuzonAlertas.java`                    | Buzón ilimitado donde el bróker deposita los eventos anómalos; el administrador los consume con espera semi-activa.                   |
+| `BuzonClasificacion.java`              | Buzón acotado (tam1) para eventos listos para clasificar. Tiene dos modos de depósito: pasivo (bróker) y semi-activo (administrador). |
+| `BuzonConsolidacion.java`              | Buzón acotado (tam2) para cada servidor de consolidación.                                                                             |
+| `Sensor.java`                          | Hilo productor que genera un número asignado de eventos y los deposita en el buzón de entrada.                                        |
+| `Broker.java`                          | Hilo que lee del buzón de entrada, clasifica eventos como normales o anómalos, y los reenvía al buzón correspondiente.                |
+| `Administrador.java`                   | Hilo que lee alertas con espera semi-activa, descarta las confirmadas y reenvía las inofensivas al buzón de clasificación.            |
+| `Clasificador.java`                    | Hilo consumidor que toma eventos del buzón de clasificación y los enruta al buzón del servidor correspondiente.                       |
+| `ControlFinClasificadores.java`        | Contador compartido para detectar al último clasificador en terminar.                                                                 |
+| `ServidorConsolidacionDespliegue.java` | Hilo consumidor que procesa eventos de su buzón y termina al recibir un evento fin.                                                   |
+| `Main.java`                            | Programa principal: lee el archivo `config.txt`, instancia los componentes, arranca los hilos y espera su terminación con `join()`.   |
+| `PruebaTuParte.java`                   | Driver auxiliar heredado de pruebas tempranas del submódulo de clasificación. No se usa en la ejecución completa del sistema.         |
 
-## 3. Diseno de clases
+El archivo de configuración `config.txt` contiene los parámetros en formato `clave=valor`:
+
+```
+ni=2
+base=2
+nc=2
+ns=2
+tam1=3
+tam2=2
+```
+
+## 3. Diseño de clases
 
 ### 3.1 `Evento`
 
-La clase `Evento` es un contenedor de datos con tres atributos:
+Contenedor de datos con tres atributos: `id` (identificador textual), `tipo` (entero entre 1 y ns que indica el servidor destino) y `fin` (bandera booleana para eventos de terminación). Tiene dos constructores: uno para eventos normales y otro para eventos de fin. Ofrece los métodos `darId()`, `darTipo()` y `esFin()`.
 
-- `id`: identificador textual del evento.
-- `tipo`: numero entero que indica el servidor destino.
-- `fin`: bandera que indica si el evento es de terminacion.
+### 3.2 `BuzonEntrada`
 
-Cuenta con dos constructores:
+Buzón de capacidad ilimitada implementado con `LinkedList<Evento>`, sincronizado con monitor. El método `depositar(Evento e)` nunca bloquea porque la capacidad no tiene límite, y después de insertar hace `notifyAll()` para despertar al bróker. El método `retirar()` usa espera pasiva: si la cola está vacía, el hilo se duerme con `wait()` dentro de un `while`.
 
-- `Evento(String pId, int pTipo)` para un evento normal.
-- `Evento(boolean pFin)` para representar un evento de fin.
+### 3.3 `BuzonAlertas`
 
-Tambien ofrece tres metodos de acceso:
+Estructura análoga al buzón de entrada, pero el método `retirar()` implementa **espera semi-activa**: en lugar de usar `wait()`, el hilo entra en un bucle que llama a `Thread.yield()` mientras la cola esté vacía, cediendo el procesador sin quedarse dormido. Esto cumple con la indicación de la Figura 1, donde la rama de alertas aparece marcada con flechas punteadas.
 
-- `darId()`
-- `darTipo()`
-- `esFin()`
+### 3.4 `BuzonClasificacion`
 
-### 3.2 `BuzonClasificacion`
+Buzón de capacidad limitada `tam1`. Tiene un único método `retirar()` con espera pasiva (los clasificadores), y **dos métodos de depósito**:
 
-Es un buffer compartido implementado con `LinkedList<Evento>`. Su capacidad es limitada y controla acceso concurrente mediante sincronizacion de monitor.
+- `depositar(Evento e)`: espera pasiva. Si el buzón está lleno, el hilo se duerme con `wait()`. Lo usa el bróker.
+- `depositarSemiActivo(Evento e)`: espera semi-activa. Si el buzón está lleno, el hilo entra en un bucle con `Thread.yield()` hasta que haya espacio. Lo usa el administrador.
 
-Metodos principales:
+Esta distinción es necesaria porque la Figura 1 muestra que el bróker llega al buzón de clasificación por una flecha sólida (pasiva), mientras que el administrador llega por una punteada (semi-activa). En ambos casos, tras depositar se hace `notifyAll()` para despertar a los clasificadores que pudieran estar dormidos.
 
-- `depositar(Evento e)`: espera mientras el buzon este lleno, luego inserta el evento y notifica a los hilos en espera.
-- `retirar()`: espera mientras el buzon este vacio, luego retira el primer evento y notifica a los hilos en espera.
+### 3.5 `BuzonConsolidacion`
 
-### 3.3 `BuzonConsolidacion`
+Buzón de capacidad limitada `tam2`, uno por servidor. Usa `synchronized`, `wait()` y `notifyAll()` en ambos extremos (depósito y retiro). El método `darTamano()` permite consultar la ocupación de forma sincronizada, útil para validación.
 
-Su estructura es igual a la del buzon de clasificacion, pero corresponde al canal de salida de cada servidor.
+### 3.6 `Sensor`
 
-Ademas de `depositar()` y `retirar()`, incluye:
-
-- `darTamano()`: retorna el numero actual de eventos en la cola.
-
-### 3.4 `Clasificador`
-
-Es un hilo que consume eventos del buzon de clasificacion.
+Hereda de `Thread`. Recibe por constructor: su `id`, el `numeroEventos` que debe generar (calculado como `base × id` en el `Main`), el número de servidores `ns`, el `BuzonEntrada` compartido y la barrera de arranque.
 
 Comportamiento:
 
-1. Retira un evento del buzon de clasificacion.
-2. Si el evento no es de fin, obtiene su tipo.
-3. Reenvia el evento al buzon de consolidacion asociado a `tipo - 1`.
-4. Si recibe un evento de fin, termina su ciclo.
-5. El ultimo clasificador en terminar envia un evento de fin a cada servidor de consolidacion.
+1. Llama a `barrera.await()` como primera instrucción.
+2. Genera `numeroEventos` eventos. Cada uno tiene identificador `"S{id}-{secuencial}"` y tipo pseudoaleatorio entre 1 y ns.
+3. Deposita cada evento en el `BuzonEntrada`.
+4. Termina al agotar su cuota e imprime un mensaje de terminación.
 
-### 3.5 `ControlFinClasificadores`
+### 3.7 `Broker`
 
-Es un contador compartido que registra cuantos clasificadores siguen activos.
-
-Su metodo:
-
-- `ultimoEnTerminar()`: esta sincronizado, decrementa el contador y retorna `true` solo cuando el ultimo clasificador termina.
-
-Esta clase evita condiciones de carrera en la deteccion del ultimo hilo activo.
-
-### 3.6 `ServidorConsolidacionDespliegue`
-
-Es un hilo que representa un servidor de consolidacion y despliegue.
+Hereda de `Thread`. Recibe el `totalEsperado` (calculado en el `Main` como `base × ni × (ni + 1) / 2`), el `BuzonEntrada`, el `BuzonAlertas`, el `BuzonClasificacion` y la barrera.
 
 Comportamiento:
 
-1. Retira eventos de su buzon.
-2. Si el evento es normal, lo procesa.
-3. El procesamiento se simula con una espera aleatoria entre 100 ms y 1000 ms.
-4. Si recibe un evento de fin, termina.
+1. Llama a `barrera.await()`.
+2. En un bucle, retira un evento del buzón de entrada y genera un número pseudoaleatorio entre 0 y 200.
+3. Si el número es múltiplo de 8, envía el evento al `BuzonAlertas`.
+4. Si no, lo envía al `BuzonClasificacion` con `depositar` (pasivo).
+5. Cuando ha procesado `totalEsperado` eventos, deposita un `Evento` de fin en el `BuzonAlertas` y termina.
 
-### 3.7 `PruebaTuParte`
+Esta decisión de diseño, en la que el `Main` calcula el total y se lo pasa por constructor, separa responsabilidades: el bróker no necesita conocer ni la cantidad de sensores ni la base de eventos.
 
-Es el programa principal de prueba.
+### 3.8 `Administrador`
 
-En la version actual:
+Hereda de `Thread`. Recibe el `BuzonAlertas`, el `BuzonClasificacion`, el número de clasificadores `nc` y la barrera.
 
-- Crea `ns = 3` servidores.
-- Crea `nc = 2` clasificadores.
-- Crea un buzon de clasificacion con capacidad 5.
-- Crea un buzon de consolidacion para cada servidor con capacidad 3.
-- Deposita manualmente eventos de prueba.
-- Deposita eventos de fin para que los clasificadores terminen.
+Comportamiento:
+
+1. Llama a `barrera.await()`.
+2. En un bucle, retira eventos del `BuzonAlertas` usando espera semi-activa.
+3. Si el evento es de fin, sale del bucle.
+4. Si es normal, genera un número pseudoaleatorio entre 0 y 20. Si es múltiplo de 4 se considera inofensivo y se reenvía al `BuzonClasificacion` con `depositarSemiActivo`. Si no, se descarta.
+5. Al terminar, antes de salir, deposita `nc` eventos de fin en el `BuzonClasificacion` usando `depositarSemiActivo`, uno por cada clasificador.
+
+### 3.9 `Clasificador`
+
+Hereda de `Thread`. Recibe su `id`, el `BuzonClasificacion`, el arreglo de `BuzonConsolidacion`, el `ControlFinClasificadores` compartido y la barrera.
+
+Comportamiento:
+
+1. Llama a `barrera.await()`.
+2. Retira eventos del buzón de clasificación uno por uno.
+3. Si el evento es normal, lo enruta al buzón `buzonesConsolidacion[tipo - 1]`.
+4. Si el evento es de fin, llama a `control.ultimoEnTerminar()`. Si recibe `true`, genera `ns` eventos de fin y deposita uno en cada buzón de consolidación. En cualquier caso, termina.
+
+### 3.10 `ControlFinClasificadores`
+
+Contador entero compartido por todos los clasificadores. Tiene un único método `ultimoEnTerminar()` declarado `synchronized`, que decrementa el contador y retorna `true` si quedó en cero. Garantiza que solo un clasificador (el último) ejecute la lógica de envío de fines a los servidores.
+
+### 3.11 `ServidorConsolidacionDespliegue`
+
+Hereda de `Thread`. Recibe su `id`, su `BuzonConsolidacion` y la barrera.
+
+Comportamiento:
+
+1. Llama a `barrera.await()`.
+2. Retira eventos de su buzón.
+3. Si es normal, lo procesa durmiendo un tiempo pseudoaleatorio entre 100 y 1000 ms.
+4. Si es de fin, termina.
+
+### 3.12 `Main`
+
+Programa principal. Su lógica es:
+
+1. Lee `config.txt` con `Properties` y obtiene `ni`, `base`, `nc`, `ns`, `tam1`, `tam2`.
+2. Calcula el total esperado de eventos: `base × ni × (ni + 1) / 2`.
+3. Calcula el número de partes de la barrera: `ni + nc + ns + 2` (sensores, clasificadores, servidores, bróker y administrador).
+4. Instancia todos los buzones, el control de fin y la barrera.
+5. Instancia y arranca los hilos en orden: servidores, clasificadores, administrador, bróker, sensores. Este orden es defensivo: garantiza que los consumidores existan antes que los productores, aunque con la barrera de arranque ninguno empieza a trabajar hasta que todos estén listos.
+6. Hace `join()` sobre todos los hilos y al final imprime `"Simulacion completada"`.
 
 ## 4. Diagrama de clases
 
@@ -124,10 +166,23 @@ classDiagram
         +esFin() boolean
     }
 
+    class BuzonEntrada {
+        -LinkedList~Evento~ cola
+        +depositar(Evento e) void
+        +retirar() Evento
+    }
+
+    class BuzonAlertas {
+        -LinkedList~Evento~ cola
+        +depositar(Evento e) void
+        +retirar() Evento
+    }
+
     class BuzonClasificacion {
         -LinkedList~Evento~ cola
         -int capacidad
         +depositar(Evento e) void
+        +depositarSemiActivo(Evento e) void
         +retirar() Evento
     }
 
@@ -139,11 +194,38 @@ classDiagram
         +darTamano() int
     }
 
+    class Sensor {
+        -int id
+        -int numeroEventos
+        -int ns
+        -BuzonEntrada buzonEntrada
+        -CyclicBarrier barrera
+        +run() void
+    }
+
+    class Broker {
+        -int totalEsperado
+        -BuzonEntrada buzonEntrada
+        -BuzonAlertas buzonAlertas
+        -BuzonClasificacion buzonClasificacion
+        -CyclicBarrier barrera
+        +run() void
+    }
+
+    class Administrador {
+        -int nc
+        -BuzonAlertas buzonAlertas
+        -BuzonClasificacion buzonClasificacion
+        -CyclicBarrier barrera
+        +run() void
+    }
+
     class Clasificador {
         -int idClasificador
         -BuzonClasificacion buzonClasificacion
         -BuzonConsolidacion[] buzonesConsolidacion
         -ControlFinClasificadores control
+        -CyclicBarrier barrera
         +run() void
     }
 
@@ -155,143 +237,168 @@ classDiagram
     class ServidorConsolidacionDespliegue {
         -int idServidor
         -BuzonConsolidacion buzon
+        -CyclicBarrier barrera
         +procesarEvento(Evento e) void
         +run() void
     }
 
-    class PruebaTuParte {
+    class Main {
         +main(String[] args) void
     }
 
+    Sensor --> BuzonEntrada
+    BuzonEntrada --> Evento
+    Broker --> BuzonEntrada
+    Broker --> BuzonAlertas
+    Broker --> BuzonClasificacion
+    BuzonAlertas --> Evento
+    Administrador --> BuzonAlertas
+    Administrador --> BuzonClasificacion
     BuzonClasificacion --> Evento
-    BuzonConsolidacion --> Evento
     Clasificador --> BuzonClasificacion
     Clasificador --> BuzonConsolidacion
     Clasificador --> ControlFinClasificadores
+    BuzonConsolidacion --> Evento
     ServidorConsolidacionDespliegue --> BuzonConsolidacion
-    PruebaTuParte --> BuzonClasificacion
-    PruebaTuParte --> BuzonConsolidacion
-    PruebaTuParte --> Clasificador
-    PruebaTuParte --> ServidorConsolidacionDespliegue
+    Main --> Sensor
+    Main --> Broker
+    Main --> Administrador
+    Main --> Clasificador
+    Main --> ServidorConsolidacionDespliegue
 ```
 
 ## 5. Funcionamiento del programa
 
-El flujo actual del sistema es el siguiente:
+El flujo del sistema, desde que se ejecuta `Main` hasta su terminación, es el siguiente:
 
-1. `PruebaTuParte` crea la infraestructura de hilos y buzones.
-2. Se ponen en marcha los servidores de consolidacion.
-3. Se crean y arrancan los clasificadores.
-4. El programa principal deposita eventos en el buzon de clasificacion.
-5. Cada clasificador toma eventos, lee el tipo y reenvia el evento al servidor correspondiente.
-6. Cada servidor procesa el evento recibido y espera el siguiente.
-7. Cuando los clasificadores reciben un evento de fin, terminan.
-8. El ultimo clasificador en terminar envia un evento de fin a cada servidor.
-9. Los servidores terminan al consumir su evento de fin.
+1. `Main` lee `config.txt` y calcula el total esperado de eventos y las partes de la barrera.
+2. Se instancian los buzones (entrada, alertas, clasificación, consolidación por servidor), el control de fin de clasificadores y la barrera cíclica.
+3. Se crean y arrancan los hilos en orden defensivo: servidores, clasificadores, administrador, bróker, sensores. Todos quedan bloqueados en `barrera.await()`.
+4. Cuando el último hilo llega a la barrera, todos se liberan simultáneamente y empiezan su trabajo.
+5. Los sensores generan sus eventos y los depositan en el buzón de entrada. Cada sensor termina al agotar su cuota.
+6. El bróker lee eventos del buzón de entrada y los clasifica como normales (van al buzón de clasificación) o anómalos (van al buzón de alertas). Cuando procesa el total esperado, manda un evento de fin al buzón de alertas y termina.
+7. Los clasificadores consumen eventos del buzón de clasificación y los enrutan al buzón del servidor correspondiente según su tipo.
+8. El administrador consume eventos del buzón de alertas. Los que pasan la inspección los reenvía al buzón de clasificación; los demás los descarta. Al recibir el fin del bróker, deposita `nc` eventos de fin en el buzón de clasificación y termina.
+9. Cada clasificador, al recibir su evento de fin, registra su terminación en `ControlFinClasificadores`. El último clasificador en terminar deposita `ns` eventos de fin, uno por cada buzón de consolidación.
+10. Cada servidor termina al consumir el evento de fin de su buzón.
+11. `Main` hace `join()` sobre todos los hilos y confirma el cierre con `"Simulacion completada"`.
 
-## 6. Sincronizacion entre objetos
+## 6. Estrategia de sincronización
 
-### 6.1 `PruebaTuParte` y `BuzonClasificacion`
+### 6.1 Espera pasiva vs espera semi-activa
 
-`PruebaTuParte` actua como productor inicial de eventos. Al llamar `depositar()`, si el buzon esta lleno el hilo se bloquea con `wait()`. Cuando haya espacio, el evento se inserta y se ejecuta `notifyAll()` para despertar a los consumidores.
+El enunciado exige usar los dos patrones según indica la Figura 1. La correspondencia en el código es la siguiente:
 
-### 6.2 `BuzonClasificacion` y `Clasificador`
+- **Espera pasiva** (flechas sólidas en la figura): implementada con `synchronized` + `wait()` + `notifyAll()`. Se usa en el camino principal del pipeline: Sensor → Bróker → Clasificador → Servidor. El hilo que espera libera el monitor y queda dormido hasta que otro hilo lo despierte, sin consumir CPU.
 
-Esta relacion es productor-consumidor.
+- **Espera semi-activa** (flechas punteadas): implementada con un bucle `while(condicion) { Thread.yield(); }`. Se usa en la rama de alertas: Bróker → Administrador → Clasificador. El hilo no se duerme sino que cede el procesador repetidamente hasta que la condición cambia. Consume un poco más de CPU que la pasiva pero responde más rápido a cambios de estado.
 
-- Si el buzon esta vacio, el clasificador espera con `wait()`.
-- Cuando entra un evento, `depositar()` llama a `notifyAll()`.
-- Se usa `while` en lugar de `if` para revalidar la condicion despues de despertar.
+En concreto:
 
-### 6.3 `Clasificador` y `BuzonConsolidacion`
+- El `BuzonAlertas.retirar()` implementa espera semi-activa del lado del administrador.
+- El `BuzonClasificacion.depositarSemiActivo()` implementa espera semi-activa del lado del administrador cuando el buzón está lleno.
 
-El clasificador se convierte en productor del buzon de consolidacion.
+Todos los demás puntos de espera del sistema son pasivos.
 
-- Cada evento se deposita en el buzon del servidor correspondiente.
-- Si el buzon esta lleno, el clasificador espera.
-- Cuando un servidor retira un evento, notifica a los productores con `notifyAll()`.
+### 6.2 Barrera de arranque con `CyclicBarrier`
 
-### 6.4 `BuzonConsolidacion` y `ServidorConsolidacionDespliegue`
+El enunciado lista explícitamente `CyclicBarrier` entre las primitivas permitidas. Se emplea en el proyecto como barrera de arranque: todos los hilos (sensores, bróker, administrador, clasificadores y servidores) llaman a `barrera.await()` como primera instrucción de su `run()`. El número de partes de la barrera se calcula como `ni + nc + ns + 2` (sumando los sensores, clasificadores, servidores, el bróker y el administrador).
 
-El servidor es consumidor del buzon.
+Esto garantiza que ningún hilo empiece a producir o consumir hasta que todos los demás estén efectivamente arrancados, lo que facilita la interpretación de los logs de ejecución y elimina variaciones de comportamiento asociadas al orden en que el planificador del sistema operativo activa los hilos.
 
-- Si no hay eventos, el servidor espera.
-- Cuando llega un evento, lo retira y lo procesa.
-- El uso de `notifyAll()` evita que varios hilos queden dormidos innecesariamente cuando cambia el estado del buzon.
+### 6.3 Sincronización por pareja de objetos
 
-### 6.5 `Clasificador` y `ControlFinClasificadores`
+Siguiendo lo pedido en el enunciado, se detalla la sincronización para cada pareja de objetos que interactúa a través de un recurso compartido.
 
-Los clasificadores comparten un contador de terminacion.
+**Sensor ↔ BuzonEntrada.** Relación productor-recurso. Los sensores son productores. El buzón es ilimitado, por lo que `depositar()` nunca bloquea, pero sigue estando declarado `synchronized` para garantizar exclusión mutua en la manipulación de la cola entre múltiples sensores concurrentes. Después de insertar se hace `notifyAll()` para despertar al bróker si está dormido.
 
-- `ultimoEnTerminar()` es `synchronized`.
-- Solo un clasificador puede decrementar y verificar el contador a la vez.
-- El clasificador que deja el contador en cero es el ultimo en terminar y se encarga de enviar los eventos de fin a los servidores.
+**BuzonEntrada ↔ Broker.** El bróker es el único consumidor. En `retirar()` se usa espera pasiva con `while (cola.isEmpty()) wait();`. Cuando un sensor deposita y hace `notifyAll()`, el bróker reanuda, revalida la condición con `while` (para protegerse contra despertares espurios) y toma el evento.
 
-### 6.6 `Clasificador` y `ServidorConsolidacionDespliegue`
+**Broker ↔ BuzonAlertas.** El bróker es productor. Como el buzón es ilimitado, no bloquea al depositar, pero el método es `synchronized` para evitar condiciones de carrera con el administrador que lee concurrentemente.
 
-La comunicacion no es directa por referencia, sino a traves de `BuzonConsolidacion`.
+**BuzonAlertas ↔ Administrador.** El administrador es el único consumidor y aquí se usa espera **semi-activa**: `retirar()` revisa si la cola está vacía en un bucle `while` con `Thread.yield()`. Esto significa que el administrador no se duerme, sino que cede el procesador y vuelve a chequear. El método sigue siendo `synchronized` para que la prueba de la condición y el retiro del elemento sean atómicos.
 
-- El clasificador enruta por `tipo - 1`.
-- El servidor consume solo de su propio buzon.
-- Esta separacion reduce el acoplamiento entre ambos componentes.
+**Broker ↔ BuzonClasificacion.** El bróker deposita con `depositar()` (pasivo). Si el buzón está lleno (capacidad `tam1`), se duerme con `wait()` hasta que un clasificador retire un evento y haga `notifyAll()`.
 
-## 7. Validacion
+**Administrador ↔ BuzonClasificacion.** El administrador deposita con `depositarSemiActivo()`. Si el buzón está lleno, entra en un bucle `while` con `Thread.yield()` hasta que un clasificador libere espacio. Tras insertar hace `notifyAll()` para despertar a los clasificadores que pudieran estar esperando por eventos.
 
-### 7.1 Compilacion
+**BuzonClasificacion ↔ Clasificador.** Los clasificadores son consumidores y usan espera pasiva: `retirar()` duerme con `wait()` mientras la cola esté vacía. Después de retirar hace `notifyAll()` para desbloquear a los productores (bróker o administrador) que estén esperando por espacio.
 
-Se compilo el proyecto en un directorio de salida separado para evitar depender de los `.class` viejos que estaban dentro de `src`.
+**Clasificador ↔ BuzonConsolidacion.** Los clasificadores son productores con espera pasiva. Si el buzón del servidor destino está lleno (capacidad `tam2`), el clasificador se duerme hasta que el servidor retire un evento.
 
-Comando usado:
+**BuzonConsolidacion ↔ Servidor.** El servidor es consumidor con espera pasiva. Espera con `wait()` mientras su buzón esté vacío; al llegar un evento, un `notifyAll()` en el `depositar()` del clasificador lo despierta.
 
-```powershell
-javac -d out src\*.java
+**Clasificador ↔ Clasificador (vía ControlFinClasificadores).** Los clasificadores compiten por actualizar el contador de activos al terminar. El método `ultimoEnTerminar()` es `synchronized` para asegurar que el decremento y la comparación con cero se ejecuten de forma atómica. Esto garantiza que exactamente un clasificador —el último que termina— reciba el retorno `true` y asuma la responsabilidad de enviar los eventos de fin a los servidores, eliminando cualquier condición de carrera en la detección del último.
+
+**Todos los hilos ↔ CyclicBarrier.** La barrera de arranque sincroniza el inicio de todos los hilos del sistema mediante `await()`. Cuando las `ni + nc + ns + 2` partes han llegado, la barrera libera simultáneamente a todos los hilos.
+
+## 7. Validación
+
+Se realizaron dos pruebas de ejecución con el objetivo de verificar la corrección funcional, la conservación de eventos y la ausencia de bloqueos mutuos o buzones con eventos remanentes al final.
+
+### 7.1 Prueba 1: configuración básica
+
+Configuración:
+
+```
+ni=2  base=2  nc=2  ns=2  tam1=3  tam2=2
 ```
 
-El bytecode generado para `PruebaTuParte.class` quedo en version 52, compatible con Java 8.
+Total esperado de eventos: `2 × 2 × 3 / 2 = 6`. Partes de la barrera: `2 + 2 + 2 + 2 = 8`.
 
-### 7.2 Ejecucion
+Extracto de la ejecución observada:
 
-Se ejecuto la prueba principal con:
-
-```powershell
-java -cp out PruebaTuParte
+```
+Configuracion: ni=2 base=2 nc=2 ns=2 tam1=3 tam2=2
+Total eventos esperados: 6, partes barrera: 8
+Sensor 1 termina (2 eventos).
+Sensor 2 termina (4 eventos).
+Broker termina (6 eventos procesados).
+Clasificador 2 envió evento S2-1 al servidor 2
+Servidor 1 procesando evento S1-2 de tipo 1
+...
+Administrador termina, envió 2 FINes a BuzonClasificacion.
+Clasificador 1 termina.
+Clasificador 2 termina.
+Servidor 1 termina.
+Servidor 2 termina.
+Simulacion completada.
 ```
 
-Resultado observado:
+Verificaciones:
 
-- Los clasificadores reenviaron eventos a los servidores correctos.
-- Los servidores procesaron los eventos y mostraron mensajes de terminacion.
-- El ultimo clasificador envio los eventos de fin a todos los servidores.
-- El sistema termino correctamente al agotarse los eventos.
+- El sensor 1 generó 2 eventos y el sensor 2 generó 4, sumando 6. Coincide con el total esperado.
+- El bróker reporta haber procesado 6 eventos, coincidente con el total.
+- Se contaron 5 eventos reenviados por los clasificadores a los servidores. Los 5 + 1 descartado por el administrador dan 6, que es el total. La conservación de eventos se cumple.
+- El administrador depositó exactamente 2 eventos de fin en el buzón de clasificación, igual al número de clasificadores.
+- Todos los hilos reportaron su mensaje de terminación. No hubo cuelgue.
+- El mensaje final `"Simulacion completada"` confirma que `Main.join()` pudo cerrarse para todos los hilos, lo que implica que ningún hilo quedó bloqueado.
 
-### 7.3 Evidencia funcional
+### 7.2 Prueba 2: configuración de estrés
 
-En la ejecucion de prueba se observo un flujo coherente con la logica del programa:
+Configuración:
 
-- Eventos `E1` a `E5` fueron distribuidos entre servidores segun su tipo.
-- Ambos clasificadores terminaron tras recibir el evento de fin.
-- Los tres servidores terminaron tras recibir su evento de fin.
+```
+ni=3  base=5  nc=5  ns=2  tam1=2  tam2=2
+```
 
-## 8. Alcance actual y observaciones
+Total esperado de eventos: `5 × 3 × 4 / 2 = 30`. Partes de la barrera: `3 + 5 + 2 + 2 = 12`. Esta configuración estresa la sincronización con buzones muy pequeños (`tam1=2`, `tam2=2`) y alta concurrencia (5 clasificadores compitiendo por 2 buzones de consolidación). Es el escenario donde más probable sería observar un deadlock si hubiera un bug en la sincronización.
 
-La carpeta actual implementa una parte concreta del caso:
+Verificaciones sobre la traza obtenida:
 
-- Cubre el buzon de clasificacion.
-- Cubre el enrutamiento por tipo hacia multiples servidores.
-- Cubre la terminacion coordinada de varios clasificadores.
-- Cubre la espera por eventos en los servidores.
+- Sensor 1 generó 5 eventos, sensor 2 generó 10 y sensor 3 generó 15. Total: 30. Coincide con el esperado.
+- El bróker reportó "30 eventos procesados".
+- Se contaron 28 eventos reenviados por los clasificadores a los servidores. Los dos faltantes (`S2-6` y `S3-5`) corresponden a alertas confirmadas por el administrador y descartadas. 28 procesados más 2 descartados igualan los 30 totales. La conservación se mantiene.
+- El administrador reportó "envió 5 FINes a BuzonClasificacion", igual al número de clasificadores.
+- Los 5 clasificadores reportaron terminación. Los 2 servidores reportaron terminación.
+- La ejecución terminó con `"Simulacion completada"` sin cuelgue ni necesidad de interrupción externa.
 
-Sin embargo, en esta version del repositorio no aparecen aun las clases de:
+### 7.3 Observaciones sobre el orden de terminación
 
-- Sensores.
-- Broker y analizador.
-- Administrador.
-- Tampoco se lee aun el archivo de configuracion; en `PruebaTuParte` los valores de `ns` y `nc` estan fijos para la prueba.
+Las trazas de ambas pruebas muestran un orden causal correcto de terminación: sensores primero (agotan su cuota), luego el bróker (al procesar el total), luego el administrador (al recibir el fin del bróker), luego los clasificadores (al consumir los fines del administrador) y finalmente los servidores (al consumir los fines del último clasificador). Este orden es consistente con la cadena de propagación de eventos de fin descrita en el enunciado.
 
-Por eso, este informe describe la implementacion realmente presente en la carpeta y no la solucion completa del enunciado.
+## 8. Conclusión
 
-## 9. Conclusion
+La implementación cubre la arquitectura completa descrita en el enunciado, respetando las restricciones sobre las primitivas permitidas. El uso combinado de espera pasiva y semi-activa se aplica en los puntos que indica la Figura 1, y la `CyclicBarrier` agrega un punto de sincronización global al arranque que simplifica el análisis de ejecución.
 
-El codigo de la carpeta `src` muestra una solucion concurrente basica y bien delimitada para el paso de eventos entre un buzon de clasificacion, varios clasificadores y varios servidores de consolidacion. La sincronizacion se resuelve con monitores de Java, espera condicionada y un control compartido para la terminacion ordenada de los hilos.
-
-El resultado es un prototipo funcional que sirve como base para extender el sistema hacia la arquitectura completa solicitada en el enunciado.
+La coordinación de terminación funciona correctamente en ambas direcciones de la cadena: los eventos de fin se propagan desde el bróker hasta los servidores pasando por el administrador y los clasificadores, y el patrón del último clasificador asegura que los servidores reciban un único evento de fin cada uno. Las pruebas de validación muestran conservación de eventos, terminación limpia y ausencia de bloqueos mutuos, incluso bajo una configuración de estrés con buzones muy pequeños y alta concurrencia.
